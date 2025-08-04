@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from layers.Transformer_Encoder import Encoder, EncoderLayer
 from layers.SWTAttention_Family import GeomAttentionLayer, GeomAttention
 from layers.Embed import DataEmbedding_inverted
+from layers.SeasonalTrend import SeasonalTrendBlock
+from layers.ChannelMixing import GatedChannelMixing
 
 
 class Model(nn.Module):
@@ -16,6 +18,20 @@ class Model(nn.Module):
         self.geomattn_dropout = configs.geomattn_dropout
         self.alpha = configs.alpha
         self.kernel_size = configs.kernel_size
+
+        # Optional seasonal-trend decomposition
+        self.use_seasonal = getattr(configs, "use_seasonal", False)
+        self.seasonal_trend = SeasonalTrendBlock(
+            getattr(configs, "st_kernel_size", 25)
+        ) if self.use_seasonal else None
+
+        # Optional gated channel mixing
+        self.use_channel_mix = getattr(configs, "use_channel_mix", False)
+        self.channel_mix = GatedChannelMixing(
+            configs.dec_in,
+            reduction=getattr(configs, "mix_reduction", 16),
+            dropout=getattr(configs, "mix_dropout", 0.0),
+        ) if self.use_channel_mix else None
 
         enc_embedding = DataEmbedding_inverted(configs.seq_len, configs.d_model, 
                                                configs.embed, configs.freq, configs.dropout)
@@ -59,6 +75,15 @@ class Model(nn.Module):
             # x_enc /= stdev
             x_enc = x_enc / stdev
 
+        # Decompose into seasonal and trend components if enabled
+        if self.seasonal_trend is not None:
+            seasonal, trend = self.seasonal_trend(x_enc)
+            x_enc = seasonal
+
+        # Channel-wise mixing
+        if self.channel_mix is not None:
+            x_enc = self.channel_mix(x_enc)
+
         _, _, N = x_enc.shape
 
         enc_embedding = self.enc_embedding
@@ -82,4 +107,4 @@ class Model(nn.Module):
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
         dec_out, attns = self.forecast(x_enc, None, None, None)
-        return dec_out, attns 
+        return dec_out, attns
